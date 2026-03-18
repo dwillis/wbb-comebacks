@@ -58,24 +58,29 @@ def main():
     reg["time_bucket"] = reg["seconds_remaining"].apply(time_bucket_label)
     reg["deficit_bucket"] = reg["deficit"].apply(bin_deficit)
 
+    # Map trailing_team to venue label (from the trailing team's perspective)
+    reg["venue"] = reg["trailing_team"].map({"home": "home", "visitor": "away"})
+
+    group_cols = ["deficit_bucket", "time_bucket", "venue"]
+
     # --- Non-independence fix ---
     # Count raw observations (scoring plays) per cell for reference
     obs_count = (
-        reg.groupby(["deficit_bucket", "time_bucket"])
+        reg.groupby(group_cols)
         .agg(n_observations=("trailing_team_won", "count"))
         .reset_index()
     )
 
-    # Deduplicate: one observation per game per (deficit_bucket, time_bucket) cell.
+    # Deduplicate: one observation per game per (deficit_bucket, time_bucket, venue) cell.
     # Within a single game and cell, trailing_team_won is the same for all plays
     # (it's determined by the game outcome, not the individual play).
-    deduped = reg.drop_duplicates(subset=["unique_game_id", "deficit_bucket", "time_bucket"])
+    deduped = reg.drop_duplicates(subset=["unique_game_id", "deficit_bucket", "time_bucket", "venue"])
     print(f"  Deduped to {len(deduped):,} game-cell observations (from {len(reg):,} scoring plays)")
 
     # Aggregate on deduped data (independent observations)
     print("Aggregating...")
     agg = (
-        deduped.groupby(["deficit_bucket", "time_bucket"])
+        deduped.groupby(group_cols)
         .agg(
             n_games=("trailing_team_won", "count"),
             n_wins=("trailing_team_won", "sum"),
@@ -84,7 +89,7 @@ def main():
     )
 
     # Merge in raw observation counts
-    agg = agg.merge(obs_count, on=["deficit_bucket", "time_bucket"], how="left")
+    agg = agg.merge(obs_count, on=group_cols, how="left")
 
     agg["trailing_team_win_pct"] = agg["n_wins"] / agg["n_games"]
 
@@ -103,7 +108,7 @@ def main():
     # Sort for readability
     agg["_deficit_sort"] = agg["deficit_bucket"].apply(bin_deficit_sort_key)
     agg["_time_sort"] = agg["time_bucket"].apply(time_bucket_sort_key)
-    agg = agg.sort_values(["_deficit_sort", "_time_sort"]).drop(columns=["_deficit_sort", "_time_sort"])
+    agg = agg.sort_values(["venue", "_deficit_sort", "_time_sort"]).drop(columns=["_deficit_sort", "_time_sort"])
 
     # Save
     output_path = Path(args.output)
@@ -114,47 +119,48 @@ def main():
     # Print some highlights
     print("\n--- Highlights ---")
 
-    # Overall comeback rate by deficit bucket
-    by_deficit = (
-        agg.groupby("deficit_bucket")
-        .apply(lambda g: g["n_wins"].sum() / g["n_games"].sum())
-        .reset_index(name="trailing_team_win_pct")
-    )
-    by_deficit["_sort"] = by_deficit["deficit_bucket"].apply(bin_deficit_sort_key)
-    by_deficit = by_deficit.sort_values("_sort").drop(columns=["_sort"])
-    print("\nTrailing team win rate by deficit size:")
-    for _, row in by_deficit.iterrows():
-        print(f"  {row['deficit_bucket']:>5} pts: {row['trailing_team_win_pct']:.1%}")
+    # Overall comeback rate by deficit bucket and venue
+    for venue in ["home", "away"]:
+        venue_agg = agg[agg["venue"] == venue]
+        by_deficit = (
+            venue_agg.groupby("deficit_bucket")
+            .apply(lambda g: g["n_wins"].sum() / g["n_games"].sum())
+            .reset_index(name="trailing_team_win_pct")
+        )
+        by_deficit["_sort"] = by_deficit["deficit_bucket"].apply(bin_deficit_sort_key)
+        by_deficit = by_deficit.sort_values("_sort").drop(columns=["_sort"])
+        print(f"\nTrailing team win rate by deficit size (trailing team is {venue}):")
+        for _, row in by_deficit.iterrows():
+            print(f"  {row['deficit_bucket']:>5} pts: {row['trailing_team_win_pct']:.1%}")
 
     # "Point of no return" — for each deficit, find the earliest time at which
     # the trailing team win rate drops below 5% and stays there
-    print("\nPoint of no return (trailing team win rate < 5% sustained):")
-    for deficit_label in sorted(agg["deficit_bucket"].unique(), key=bin_deficit_sort_key):
-        subset = agg[
-            (agg["deficit_bucket"] == deficit_label)
-            & (agg["adequate_sample"])
-        ].copy()
-        subset = subset.sort_values(
-            "time_bucket", key=lambda s: s.map(time_bucket_sort_key), ascending=False
-        )
+    for venue in ["home", "away"]:
+        venue_agg = agg[agg["venue"] == venue]
+        print(f"\nPoint of no return — trailing team is {venue} (win rate < 5% sustained):")
+        for deficit_label in sorted(venue_agg["deficit_bucket"].unique(), key=bin_deficit_sort_key):
+            subset = venue_agg[
+                (venue_agg["deficit_bucket"] == deficit_label)
+                & (venue_agg["adequate_sample"])
+            ].copy()
+            subset = subset.sort_values(
+                "time_bucket", key=lambda s: s.map(time_bucket_sort_key), ascending=False
+            )
 
-        # Walk from highest time bucket downward. Find the first bucket where
-        # all buckets at this time or less are below 5%.
-        point_of_no_return = None
-        time_values = subset["time_bucket"].tolist()
-        win_pcts = subset["trailing_team_win_pct"].tolist()
+            point_of_no_return = None
+            time_values = subset["time_bucket"].tolist()
+            win_pcts = subset["trailing_team_win_pct"].tolist()
 
-        for i, (tb, wp) in enumerate(zip(time_values, win_pcts)):
-            # Check if all remaining buckets (this one and all with less time) are < 5%
-            remaining_pcts = win_pcts[i:]
-            if all(p < 0.05 for p in remaining_pcts):
-                point_of_no_return = tb
-                break
+            for i, (tb, wp) in enumerate(zip(time_values, win_pcts)):
+                remaining_pcts = win_pcts[i:]
+                if all(p < 0.05 for p in remaining_pcts):
+                    point_of_no_return = tb
+                    break
 
-        if point_of_no_return is not None:
-            print(f"  {deficit_label:>5} pts: {point_of_no_return} min remaining")
-        else:
-            print(f"  {deficit_label:>5} pts: never drops below 5% (with adequate sample)")
+            if point_of_no_return is not None:
+                print(f"  {deficit_label:>5} pts: {point_of_no_return} min remaining")
+            else:
+                print(f"  {deficit_label:>5} pts: never drops below 5% (with adequate sample)")
 
 
 if __name__ == "__main__":

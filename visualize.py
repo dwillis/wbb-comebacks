@@ -28,26 +28,8 @@ from utils import (
 )
 
 
-def make_heatmap(probs_df, output_dir):
-    """Create the primary heatmap: trailing team win probability by deficit and time remaining."""
-    df = probs_df[probs_df["adequate_sample"]].copy()
-
-    pivot = df.pivot_table(
-        index="deficit_bucket",
-        columns="time_bucket",
-        values="trailing_team_win_pct",
-        aggfunc="first",
-    )
-
-    # Sort rows by deficit
-    sorted_idx = sorted(pivot.index, key=bin_deficit_sort_key)
-    pivot = pivot.loc[sorted_idx]
-
-    # Sort columns by time remaining descending (most time on left)
-    sorted_cols = sorted(pivot.columns, key=time_bucket_sort_key, reverse=True)
-    pivot = pivot[sorted_cols]
-
-    # Build annotation array: only label landmark values (near 5%, 10%, 25%, 50%)
+def _make_single_heatmap(ax, pivot, title):
+    """Render a single heatmap onto the given axes."""
     landmarks = [0.05, 0.10, 0.25, 0.50]
     annot_array = pd.DataFrame("", index=pivot.index, columns=pivot.columns)
     for r in range(pivot.shape[0]):
@@ -56,7 +38,6 @@ def make_heatmap(probs_df, output_dir):
             if pd.notna(val) and any(abs(val - lm) < 0.02 for lm in landmarks):
                 annot_array.iloc[r, c] = f"{val:.0%}"
 
-    fig, ax = plt.subplots(figsize=(20, 10))
     sns.heatmap(
         pivot,
         cmap="RdYlGn",
@@ -68,16 +49,41 @@ def make_heatmap(probs_df, output_dir):
         linecolor="white",
         cbar_kws={"label": "Trailing Team Win Probability", "format": mticker.PercentFormatter(1.0)},
         ax=ax,
-        annot_kws={"size": 8, "fontweight": "bold"},
+        annot_kws={"size": 6, "fontweight": "bold"},
     )
+    ax.set_xlabel("Minutes Left in Game", fontsize=10)
+    ax.set_ylabel("Point Deficit", fontsize=10)
+    ax.set_title(title, fontsize=11, fontweight="bold")
 
-    ax.set_xlabel("Minutes Left in Game", fontsize=12)
-    ax.set_ylabel("Point Deficit", fontsize=12)
-    ax.set_title(
+
+def make_heatmap(probs_df, output_dir):
+    """Create side-by-side heatmaps: trailing team at home vs. away."""
+    df = probs_df[probs_df["adequate_sample"]].copy()
+
+    fig, axes = plt.subplots(1, 2, figsize=(28, 10))
+
+    for ax, venue, label in zip(axes, ["home", "away"], ["Trailing Team at Home", "Trailing Team on the Road"]):
+        venue_df = df[df["venue"] == venue]
+        pivot = venue_df.pivot_table(
+            index="deficit_bucket",
+            columns="time_bucket",
+            values="trailing_team_win_pct",
+            aggfunc="first",
+        )
+
+        sorted_idx = sorted(pivot.index, key=bin_deficit_sort_key)
+        pivot = pivot.loc[sorted_idx]
+        sorted_cols = sorted(pivot.columns, key=time_bucket_sort_key, reverse=True)
+        pivot = pivot[sorted_cols]
+
+        _make_single_heatmap(ax, pivot, label)
+
+    fig.suptitle(
         "NCAA Women's Basketball: Trailing Team Win Probability\n"
-        "By deficit and time remaining — 288K games, 2001–2026 (one observation per game per cell)",
+        "By deficit, time remaining, and venue — 288K games, 2001–2026",
         fontsize=14,
         fontweight="bold",
+        y=1.02,
     )
 
     plt.tight_layout()
@@ -88,7 +94,7 @@ def make_heatmap(probs_df, output_dir):
 
 
 def make_win_prob_curves(probs_df, output_dir):
-    """Line chart: trailing team win probability vs elapsed game time for selected deficits."""
+    """Line chart: trailing team win probability vs elapsed game time, home vs away."""
     df = probs_df[(probs_df["adequate_sample"]) & (probs_df["n_games"] >= 30)].copy()
 
     selected_deficits = ["5", "10", "11-15", "16-20", "21-25"]
@@ -97,43 +103,44 @@ def make_win_prob_curves(probs_df, output_dir):
     fig, ax = plt.subplots(figsize=(14, 8))
 
     for deficit_label, color in zip(selected_deficits, colors):
-        subset = df[df["deficit_bucket"] == deficit_label].copy()
-        if subset.empty:
-            continue
+        for venue, linestyle, alpha in [("home", "-", 1.0), ("away", "--", 0.7)]:
+            subset = df[(df["deficit_bucket"] == deficit_label) & (df["venue"] == venue)].copy()
+            if subset.empty:
+                continue
 
-        # Convert time_bucket to minutes remaining, then to elapsed time
-        subset["minutes_remaining"] = subset["time_bucket"].apply(time_bucket_sort_key)
-        subset = subset.sort_values("minutes_remaining")
-        subset["minutes_elapsed"] = 40 - subset["minutes_remaining"]
+            subset["minutes_remaining"] = subset["time_bucket"].apply(time_bucket_sort_key)
+            subset = subset.sort_values("minutes_remaining")
+            subset["minutes_elapsed"] = 40 - subset["minutes_remaining"]
 
-        ax.plot(
-            subset["minutes_elapsed"],
-            subset["trailing_team_win_pct"],
-            label=f"{deficit_label} pts",
-            color=color,
-            linewidth=2,
-        )
-        ax.fill_between(
-            subset["minutes_elapsed"],
-            subset["ci_lower"],
-            subset["ci_upper"],
-            alpha=0.15,
-            color=color,
-        )
+            # Only label once per deficit (home line gets the label)
+            label = f"{deficit_label} pts" if venue == "home" else None
+            ax.plot(
+                subset["minutes_elapsed"],
+                subset["trailing_team_win_pct"],
+                label=label,
+                color=color,
+                linewidth=2,
+                linestyle=linestyle,
+                alpha=alpha,
+            )
+
+    # Add a legend entry explaining line styles
+    ax.plot([], [], color="gray", linestyle="-", linewidth=2, label="Home (trailing)")
+    ax.plot([], [], color="gray", linestyle="--", linewidth=2, alpha=0.7, label="Away (trailing)")
 
     ax.set_xlabel("Minutes Elapsed", fontsize=12)
     ax.set_ylabel("Trailing Team Win Probability", fontsize=12)
     ax.set_title(
         "Trailing Team Win Probability by Elapsed Game Time\n"
-        "Selected deficit sizes — 95% Wilson CI bands",
+        "Selected deficit sizes — solid = home, dashed = away",
         fontsize=14,
         fontweight="bold",
     )
     ax.yaxis.set_major_formatter(mticker.PercentFormatter(1.0))
     ax.set_xlim(0, 40)
     ax.set_ylim(0, 0.6)
-    ax.axhline(y=0.05, color="gray", linestyle="--", alpha=0.5, label="5% threshold")
-    ax.legend(fontsize=11)
+    ax.axhline(y=0.05, color="gray", linestyle=":", alpha=0.5, label="5% threshold")
+    ax.legend(fontsize=10, ncol=2)
     ax.grid(alpha=0.3)
 
     plt.tight_layout()
@@ -183,16 +190,17 @@ def find_greatest_comebacks(game_states_path, probs_df, output_dir, top_n=25):
     details = comebacks.groupby("unique_game_id").apply(get_worst_moment_details).reset_index()
     worst_moments = worst_moments.merge(details, on="unique_game_id")
 
-    # Compute the deficit_bucket and time_bucket at the worst moment,
+    # Compute the deficit_bucket, time_bucket, and venue at the worst moment,
     # then look up trailing_team_win_pct from the probability table
     worst_moments["deficit_bucket"] = worst_moments["max_deficit"].apply(bin_deficit)
     worst_moments["time_bucket"] = worst_moments["max_deficit_seconds_remaining"].apply(time_bucket_label)
+    worst_moments["venue"] = worst_moments["trailing_team_at_worst"].map({"home": "home", "visitor": "away"})
 
-    # Join against probability table
-    prob_lookup = probs_df[["deficit_bucket", "time_bucket", "trailing_team_win_pct"]].copy()
+    # Join against probability table (venue-aware)
+    prob_lookup = probs_df[["deficit_bucket", "time_bucket", "venue", "trailing_team_win_pct"]].copy()
     worst_moments = worst_moments.merge(
         prob_lookup,
-        on=["deficit_bucket", "time_bucket"],
+        on=["deficit_bucket", "time_bucket", "venue"],
         how="left",
     )
     worst_moments.rename(columns={"trailing_team_win_pct": "worst_probability"}, inplace=True)
@@ -225,13 +233,15 @@ def find_greatest_comebacks(game_states_path, probs_df, output_dir, top_n=25):
     worst_moments["winner"] = worst_moments.apply(winner_name, axis=1)
     worst_moments["loser"] = worst_moments.apply(loser_name, axis=1)
     worst_moments["max_deficit_min_remaining"] = worst_moments["max_deficit_seconds_remaining"] / 60.0
+    # Whether the comeback team was playing at home or away
+    worst_moments["comeback_at"] = worst_moments["trailing_team_at_worst"].map({"home": "home", "visitor": "away"})
 
     top = worst_moments.head(top_n)
 
     out_csv = output_dir / "greatest_comebacks.csv"
     top[["unique_game_id", "season", "winner", "loser", "home_final", "away_final",
          "max_deficit", "max_deficit_min_remaining", "max_deficit_period",
-         "worst_probability"]].to_csv(out_csv, index=False)
+         "comeback_at", "worst_probability"]].to_csv(out_csv, index=False)
     print(f"Saved top {top_n} comebacks to {out_csv}")
 
     # Print top 10
@@ -239,8 +249,9 @@ def find_greatest_comebacks(game_states_path, probs_df, output_dir, top_n=25):
     for i, (_, row) in enumerate(top.head(10).iterrows(), 1):
         mins = row["max_deficit_min_remaining"]
         prob = row["worst_probability"]
+        venue_tag = "H" if row["comeback_at"] == "home" else "A"
         print(
-            f"  {i:2d}. {row['winner']} overcame {int(row['max_deficit'])}-pt deficit "
+            f"  {i:2d}. {row['winner']} [{venue_tag}] overcame {int(row['max_deficit'])}-pt deficit "
             f"({mins:.1f} min left, {prob:.1%} win prob) to beat {row['loser']} "
             f"{int(row['home_final'])}-{int(row['away_final'])} ({row['season']})"
         )
@@ -270,10 +281,10 @@ def make_single_game_chart(game_states_path, probs_df, output_dir, game_id):
     winner_name = home_name if home_won else away_name
     loser_name = away_name if home_won else home_name
 
-    # Build probability lookup dict from probs_df
+    # Build probability lookup dict from probs_df (venue-aware)
     prob_lookup = {}
     for _, row in probs_df.iterrows():
-        prob_lookup[(row["deficit_bucket"], row["time_bucket"])] = row["trailing_team_win_pct"]
+        prob_lookup[(row["deficit_bucket"], row["time_bucket"], row["venue"])] = row["trailing_team_win_pct"]
 
     # For each scoring play, compute the winner's win probability
     elapsed_times = []
@@ -305,7 +316,9 @@ def make_single_game_chart(game_states_path, probs_df, output_dir, game_id):
             deficit = abs(margin)
             deficit_bucket = bin_deficit(deficit)
             time_bucket = time_bucket_label(seconds_rem)
-            lookup_prob = prob_lookup.get((deficit_bucket, time_bucket))
+            # Determine venue for the trailing team
+            venue = "home" if margin < 0 else "away"
+            lookup_prob = prob_lookup.get((deficit_bucket, time_bucket, venue))
 
             if lookup_prob is None:
                 lookup_prob = 0.0  # extreme deficit, no data
