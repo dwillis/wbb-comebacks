@@ -4,52 +4,67 @@
 
 This is a lookup table that answers the question: **if a team is losing by X points with Y minutes left, how often do they come back to win?**
 
-It was built from ~286,000 NCAA women's basketball games spanning 25 seasons (2001-02 through 2025-26), using full play-by-play scoring data. Every time a scoring play occurred and one team was trailing, that moment became an observation: we recorded how far behind the trailing team was, how much time was left, and whether they ultimately won.
-
-The file has 597 rows. Each row represents one combination of deficit size and time remaining, with the historical comeback rate for that situation.
+It was built from ~286,000 NCAA women's basketball games spanning 25 seasons (2001-02 through 2025-26), using full play-by-play scoring data. For each game, we recorded whether the trailing team in a given deficit/time situation ultimately won — counting each game only once per situation to ensure statistical independence.
 
 ## Columns
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `deficit_bucket` | string | How far behind the trailing team is. Single-point buckets from `1` through `10`, then grouped: `11-15`, `16-20`, `21-25`, `26-30`, `31+`. |
-| `time_bucket` | integer | Minutes remaining in regulation, floored to the nearest whole minute. `0` means 0:00–0:59 left, `1` means 1:00–1:59, and so on up to `39` (39:00–40:00, i.e. the start of the game). |
-| `n_observations` | integer | How many times a team was trailing by this deficit with this much time left across all 286K games. Larger numbers mean more reliable estimates. |
-| `n_comebacks` | integer | Of those observations, how many times the trailing team went on to win the game. |
-| `comeback_pct` | float | The comeback win rate: `n_comebacks / n_observations`. Ranges from 0.0 (never happened) to ~0.46 (nearly a coin flip). |
+| `time_bucket` | string | Time remaining in regulation. For the final 2 minutes, 30-second bins: `0.0-0.5`, `0.5-1.0`, `1.0-1.5`, `1.5-2.0`. For 2+ minutes, integer-minute bins: `2`, `3`, ..., `39`. |
+| `n_games` | integer | Number of unique games where a team was trailing by this deficit with this much time left. This is the true independent sample size used for all statistics. |
+| `n_wins` | integer | Of those games, how many times the trailing team went on to win. |
+| `n_observations` | integer | Total number of scoring plays (across all games) in this cell. Larger than `n_games` because a single game can have multiple scoring plays in the same cell. Included for reference but not used for statistics. |
+| `trailing_team_win_pct` | float | The trailing team's historical win rate: `n_wins / n_games`. Ranges from 0.0 (never happened) to ~0.46 (nearly a coin flip). |
 | `ci_lower` | float | Lower bound of the 95% Wilson confidence interval. |
 | `ci_upper` | float | Upper bound of the 95% Wilson confidence interval. |
-| `adequate_sample` | boolean | `True` if `n_observations >= 30`. When `False`, the comeback percentage is based on very few games and shouldn't be taken at face value. |
+| `adequate_sample` | boolean | `True` if `n_games >= 30`. When `False`, the win percentage is based on very few independent games and shouldn't be taken at face value. |
 
 ## How to read it
 
 **Example row:**
 
 ```
-deficit_bucket: 5, time_bucket: 10, n_observations: 24892, n_comebacks: 5214, comeback_pct: 0.209, adequate_sample: True
+deficit_bucket: 5, time_bucket: 10, n_games: 18432, n_wins: 3872, n_observations: 24892, trailing_team_win_pct: 0.210, adequate_sample: True
 ```
 
-This means: across all games in the dataset, there were 24,892 moments where a team trailed by 5 points with 10–11 minutes remaining. Of those, 5,214 times (20.9%) the trailing team came back to win.
+This means: across all games in the dataset, 18,432 unique games had a moment where a team trailed by 5 points with 10–11 minutes remaining. Of those, 3,872 (21.0%) saw the trailing team come back to win. The 24,892 figure counts total scoring plays in this situation across all games (higher because a single game can have multiple scoring plays while down by 5 in the same minute).
+
+## Why n_games vs n_observations?
+
+Each game is counted **once** per cell, regardless of how many scoring plays occurred in that situation. This matters because:
+
+- A team that's down by 10 for several consecutive scoring plays would inflate the observation count but represents only one independent trial (the game either results in a comeback or it doesn't).
+- The Wilson confidence intervals require independent observations to be valid. Using `n_games` ensures the intervals are correctly calibrated.
+
+## Time bucket detail
+
+For the final 2 minutes of regulation, the table provides 30-second granularity because endgame situations change rapidly:
+
+| `time_bucket` | Meaning |
+|---------------|---------|
+| `0.0-0.5` | 0 to 30 seconds remaining |
+| `0.5-1.0` | 30 to 60 seconds remaining |
+| `1.0-1.5` | 1:00 to 1:30 remaining |
+| `1.5-2.0` | 1:30 to 2:00 remaining |
+| `2` | 2:00 to 2:59 remaining |
+| `3` | 3:00 to 3:59 remaining |
+| ... | ... |
+| `39` | 39:00 to 40:00 (start of game) |
 
 ## Key patterns in the data
 
-**Small deficits are very recoverable.** A 1-point deficit is nearly a coin flip regardless of time remaining (~45% comeback rate with 20+ minutes left). Even with under a minute to play, teams trailing by 1 still win about 25% of the time.
+**Small deficits are very recoverable.** A 1-point deficit is nearly a coin flip regardless of time remaining (~45% win rate with 20+ minutes left). Even with under 30 seconds to play, teams trailing by 1 still win roughly 25% of the time.
 
-**The cliff is steep between 10 and 15 points.** A 10-point deficit at halftime (20 min left) has roughly a 12% comeback rate. An 11-15 point deficit at halftime drops to about 6%. By 16-20 points, it's under 2%.
+**The cliff is steep between 10 and 15 points.** A 10-point deficit at halftime (20 min left) has roughly a 12% win rate for the trailing team. An 11-15 point deficit at halftime drops to about 6%. By 16-20 points, it's under 2%.
 
-**Time matters most for moderate deficits.** For a 5-point deficit, the comeback rate drops from ~25% at 30 minutes remaining to ~8% with 2 minutes left. For a 1-point deficit, time barely matters — the rate stays in the 40-45% range until the final minutes.
+**Time matters most for moderate deficits.** For a 5-point deficit, the trailing team win rate drops from ~25% at 30 minutes elapsed to ~8% with 2 minutes left. For a 1-point deficit, time barely matters — the rate stays in the 40-45% range until the final minutes.
 
-**Deficits of 20+ are essentially fatal at any point.** Even with a full game to play, trailing by 21-25 points yields a comeback rate under 1%.
+**Deficits of 20+ are essentially fatal at any point.** Even early in the game, trailing by 21-25 points yields a win rate under 1%.
 
 ## The confidence intervals
 
-The `ci_lower` and `ci_upper` columns give a 95% Wilson confidence interval around the comeback percentage. Wilson intervals are better than simple ± calculations for proportions, especially when the probability is near 0% or 100% or when sample sizes are modest.
-
-For most cells, the intervals are tight (±1-2 percentage points) because the sample sizes are large. For extreme deficits late in games, the intervals widen because there are fewer observations.
-
-## What "adequate_sample" means
-
-Only 14 of the 597 cells have `adequate_sample = False`. These are mostly extreme deficits (26-30 or 31+ points) very late in the game, where such situations almost never arise. The comeback percentages for these cells are technically computed but shouldn't be cited as reliable.
+The `ci_lower` and `ci_upper` columns give a 95% Wilson confidence interval. Wilson intervals are better than simple ± calculations for proportions, especially when the probability is near 0% or 100% or when sample sizes are modest. The intervals are computed using `n_games` (independent observations), not `n_observations`.
 
 ## Scope and limitations
 
@@ -61,17 +76,17 @@ Only 14 of the 597 cells have `adequate_sample = False`. These are mostly extrem
 
 ## Using this data
 
-**Quick lookup:** Filter to the deficit bucket and time bucket you're interested in, and read the `comeback_pct` value.
+**Quick lookup:** Filter to the deficit bucket and time bucket you're interested in, and read the `trailing_team_win_pct` value.
 
-**Visualization:** Pivot the table with `deficit_bucket` as rows and `time_bucket` as columns, with `comeback_pct` as values, to create a heatmap.
+**Visualization:** Pivot the table with `deficit_bucket` as rows and `time_bucket` as columns, with `trailing_team_win_pct` as values, to create a heatmap.
 
 ```python
 import pandas as pd
 
 df = pd.read_csv("comeback_probs.csv")
-pivot = df.pivot_table(index="deficit_bucket", columns="time_bucket", values="comeback_pct")
+pivot = df.pivot_table(index="deficit_bucket", columns="time_bucket", values="trailing_team_win_pct")
 ```
 
-**In-game win probability:** For a specific game, look up the current deficit and time remaining to get a rough win probability for the trailing team. The leading team's win probability is `1 - comeback_pct`.
+**In-game win probability:** For a specific game, look up the current deficit and time remaining to get a rough win probability for the trailing team. The leading team's win probability is `1 - trailing_team_win_pct`.
 
 **Filtering by confidence:** Use `adequate_sample == True` to exclude unreliable cells, or use the confidence interval columns to report ranges instead of point estimates.
