@@ -12,7 +12,8 @@ It was built from ~286,000 NCAA women's basketball games spanning 25 seasons (20
 |--------|------|-------------|
 | `deficit_bucket` | string | How far behind the trailing team is. Single-point buckets from `1` through `10`, then grouped: `11-15`, `16-20`, `21-25`, `26-30`, `31+`. |
 | `time_bucket` | string | Time remaining in regulation. For the final 2 minutes, 30-second bins: `0.0-0.5`, `0.5-1.0`, `1.0-1.5`, `1.5-2.0`. For 2+ minutes, integer-minute bins: `2`, `3`, ..., `39`. |
-| `n_games` | integer | Number of unique games where a team was trailing by this deficit with this much time left. This is the true independent sample size used for all statistics. |
+| `venue` | string | Whether the trailing team is `home` or `away`. Each deficit/time combination has separate rows for home and away trailing teams. |
+| `n_games` | integer | Number of unique games where a team was trailing by this deficit with this much time left (at the specified venue). This is the true independent sample size used for all statistics. |
 | `n_wins` | integer | Of those games, how many times the trailing team went on to win. |
 | `n_observations` | integer | Total number of scoring plays (across all games) in this cell. Larger than `n_games` because a single game can have multiple scoring plays in the same cell. Included for reference but not used for statistics. |
 | `trailing_team_win_pct` | float | The trailing team's historical win rate: `n_wins / n_games`. Ranges from 0.0 (never happened) to ~0.46 (nearly a coin flip). |
@@ -25,10 +26,10 @@ It was built from ~286,000 NCAA women's basketball games spanning 25 seasons (20
 **Example row:**
 
 ```
-deficit_bucket: 5, time_bucket: 10, n_games: 18432, n_wins: 3872, n_observations: 24892, trailing_team_win_pct: 0.210, adequate_sample: True
+deficit_bucket: 5, time_bucket: 10, venue: home, n_games: 9800, n_wins: 2200, n_observations: 12500, trailing_team_win_pct: 0.224, adequate_sample: True
 ```
 
-This means: across all games in the dataset, 18,432 unique games had a moment where a team trailed by 5 points with 10–11 minutes remaining. Of those, 3,872 (21.0%) saw the trailing team come back to win. The 24,892 figure counts total scoring plays in this situation across all games (higher because a single game can have multiple scoring plays while down by 5 in the same minute).
+This means: across all games in the dataset, 9,800 unique games had a moment where the home team trailed by 5 points with 10–11 minutes remaining. Of those, 2,200 (22.4%) saw the home team come back to win. The 12,500 figure counts total scoring plays in this situation across all games (higher because a single game can have multiple scoring plays while down by 5 in the same minute). A separate row with `venue: away` covers the same deficit/time situation for away teams.
 
 ## Why n_games vs n_observations?
 
@@ -71,22 +72,22 @@ The `ci_lower` and `ci_upper` columns give a 95% Wilson confidence interval. Wil
 - **Regulation only.** Overtime periods are excluded. The model covers the standard 40-minute regulation game (4 quarters × 10 minutes).
 - **All divisions.** The data includes D1, D2, D3, NAIA, and other NCAA-affiliated women's basketball. Comeback rates likely differ across competition levels but are not split here.
 - **All seasons pooled.** Twenty-five years of games are combined into one table. If the style of play has changed (e.g., more 3-point shooting in recent years), that could affect comeback odds differently by era.
-- **No home/away split.** Home court advantage likely makes home teams slightly more likely to come back, but this table doesn't separate the two.
-- **No momentum or context.** The table only knows the deficit and time remaining. It doesn't account for whether a team is on a scoring run, foul trouble, or any other contextual factor.
+- **No momentum or context.** The table only knows the deficit, time remaining, and venue. It doesn't account for whether a team is on a scoring run, foul trouble, or any other contextual factor.
 
 ## Using this data
 
-**Quick lookup:** Filter to the deficit bucket and time bucket you're interested in, and read the `trailing_team_win_pct` value.
+**Quick lookup:** Filter to the deficit bucket, time bucket, and venue you're interested in, and read the `trailing_team_win_pct` value.
 
-**Visualization:** Pivot the table with `deficit_bucket` as rows and `time_bucket` as columns, with `trailing_team_win_pct` as values, to create a heatmap.
+**Visualization:** Pivot the table with `deficit_bucket` as rows and `time_bucket` as columns, with `trailing_team_win_pct` as values, to create a heatmap. Filter by `venue` first to get home or away specific views.
 
 ```python
 import pandas as pd
 
 df = pd.read_csv("comeback_probs.csv")
-pivot = df.pivot_table(index="deficit_bucket", columns="time_bucket", values="trailing_team_win_pct")
+home = df[df["venue"] == "home"]
+pivot = home.pivot_table(index="deficit_bucket", columns="time_bucket", values="trailing_team_win_pct")
 ```
 
-**In-game win probability:** For a specific game, look up the current deficit and time remaining to get a rough win probability for the trailing team. The leading team's win probability is `1 - trailing_team_win_pct`.
+**In-game win probability:** For a specific game, look up the current deficit, time remaining, and whether the trailing team is home or away to get a win probability. The leading team's win probability is `1 - trailing_team_win_pct`.
 
 **Filtering by confidence:** Use `adequate_sample == True` to exclude unreliable cells, or use the confidence interval columns to report ranges instead of point estimates.
