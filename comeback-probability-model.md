@@ -63,15 +63,18 @@ Build a lookup table: **P(win | margin, time_remaining)**
 
 1. **Bin the data** by:
    - `margin`: 1-point buckets for small deficits (1–10), then 5-point buckets (11–15, 16–20, 21–25, 26–30, 31+)
-   - `time_remaining`: 1-minute buckets (0–1 min, 1–2 min, ... 39–40 min)
+   - `time_remaining`: 30-second buckets for the final 2 minutes (0:00–0:30, 0:30–1:00, 1:00–1:30, 1:30–2:00), then 1-minute buckets (2–3 min, ... 39–40 min)
 
-2. **For each (margin_bucket, time_bucket)**, compute:
-   - `n_observations`: how many times a team trailed by that margin with that much time left
-   - `n_comebacks`: how many of those teams won
-   - `comeback_pct`: n_comebacks / n_observations
-   - `ci_lower`, `ci_upper`: 95% Wilson confidence interval (handles small samples better than normal approximation)
+2. **Deduplicate for independence**: Each game is counted once per (margin_bucket, time_bucket) cell. A single game may pass through a cell via multiple scoring plays, but the outcome (trailing team wins or not) is the same for all of them. Using one observation per game ensures the Wilson confidence intervals are correctly calibrated.
 
-3. **Minimum sample size**: flag or exclude cells with fewer than 30 observations
+3. **For each (margin_bucket, time_bucket)**, compute:
+   - `n_games`: how many unique games had a team trailing by that margin with that much time left (independent observations)
+   - `n_wins`: how many of those games saw the trailing team win
+   - `n_observations`: total scoring plays in this cell across all games (for reference; not used for statistics)
+   - `trailing_team_win_pct`: n_wins / n_games
+   - `ci_lower`, `ci_upper`: 95% Wilson confidence interval (computed on n_games)
+
+4. **Minimum sample size**: flag cells with fewer than 30 unique games as `adequate_sample = False`
 
 ### Output
 A CSV lookup table + a heatmap visualization.
@@ -79,27 +82,25 @@ A CSV lookup table + a heatmap visualization.
 ## Phase 3: Visualization
 
 ### Heatmap (primary)
-- **X-axis**: minutes remaining (40 → 0)
-- **Y-axis**: point deficit (1 → 30+)
-- **Color**: comeback probability (0% red → 50% yellow → green never really reached)
-- Annotate cells with the probability percentage where sample size is adequate
-
-```python
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-sns.heatmap(pivot_table, cmap="RdYlGn", vmin=0, vmax=0.5,
-            annot=True, fmt=".0%")
-```
+- **X-axis**: minutes left in game (most time on left → 0 on right)
+- **Y-axis**: point deficit (1 → 31+)
+- **Color**: trailing team win probability (0% red → 50% green)
+- Annotate only landmark cells (near 5%, 10%, 25%, 50%) to avoid visual clutter
 
 ### Win Probability Curves (secondary)
-- Line chart: for selected deficits (5, 10, 15, 20 points), plot comeback probability vs. time remaining
-- Overlay with confidence bands
+- Line chart: for selected deficits (5, 10, 11–15, 16–20, 21–25 points), plot trailing team win probability vs. elapsed game time (0→40 minutes, left to right)
+- Overlay with 95% Wilson confidence bands
+- Filter cells with fewer than 30 unique games to avoid noisy CI bands
 
-### Single-Game Win Probability Chart (bonus)
-- Pick a notable comeback game
-- Plot win probability for one team over the course of the game, updating at each scoring play
-- Shows the model "in action"
+### Single-Game Win Probability Chart
+- Charts the most improbable comeback in the dataset
+- Plots one team's win probability over the course of the game, updating at each scoring play
+- Uses the probability lookup table to compute win probability at each moment
+- Annotates the worst moment (lowest win probability)
+
+### Greatest Comebacks
+- Identifies the 25 most improbable comebacks, ranked by the trailing team's win probability at their worst moment (not just by raw deficit size)
+- Joins game-level worst moments against the probability table for ranking
 
 ## Phase 4: Modeling (Optional Extension)
 
@@ -135,7 +136,7 @@ Once the model and tables are built, use them to investigate:
 2. **Home court comeback advantage**: Are home teams more likely to come back than visitors? By how much?
 3. **Era comparison**: Have comeback probabilities changed over 20 years? (hypothesis: more 3-point shooting = quicker scoring = easier comebacks)
 4. **Overtime factor**: Are games that reach OT more likely to have involved earlier comebacks?
-5. **Greatest comebacks**: Rank the most improbable comebacks in the dataset by the lowest win probability the winning team faced during the game
+5. **Greatest comebacks**: Rank the most improbable comebacks in the dataset by the lowest trailing team win probability at the worst moment (using the probability lookup table)
 6. **Conference patterns**: Which conferences produce the most comebacks? (proxy for competitive balance)
 7. **Quarter-specific momentum**: Is a 10-point deficit at halftime more or less recoverable than a 10-point deficit entering Q4?
 

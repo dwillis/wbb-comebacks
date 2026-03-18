@@ -153,13 +153,14 @@ def parse_game(filepath):
             "trailing_team": trailing_team,
             "trailing_team_won": trailing_team_won,
             "is_overtime": is_overtime,
+            "periods_regulation": periods_regulation,
             "home_final": home_final,
             "away_final": away_final,
         })
 
     # Validate: last PBP score should match game final scores.
     # If they're swapped or way off, the PBP data is unreliable for this game.
-    if rows and current_home_score > 0 and current_away_score > 0:
+    if rows and (current_home_score > 0 or current_away_score > 0):
         pbp_matches = (current_home_score == home_final and current_away_score == away_final)
         pbp_swapped = (current_home_score == away_final and current_away_score == home_final)
         if not pbp_matches and not pbp_swapped:
