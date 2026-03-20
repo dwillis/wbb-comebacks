@@ -27,6 +27,24 @@ from utils import (
     time_bucket_sort_key,
 )
 
+SLICE_CONFIGS = {
+    "all": {
+        "label": "All D-I Games",
+        "filter": None,
+        "output_suffix": "",
+    },
+    "conference": {
+        "label": "Conference Games",
+        "filter": lambda df: df[df["is_conference_game"]],
+        "output_suffix": "_conference",
+    },
+    "power4-nonconf": {
+        "label": "Power 4 vs Power 4 Non-Conference",
+        "filter": lambda df: df[df["home_is_power4"] & df["away_is_power4"] & ~df["is_conference_game"]],
+        "output_suffix": "_power4_nonconf",
+    },
+}
+
 
 def _make_single_heatmap(ax, pivot, title):
     """Render a single heatmap onto the given axes."""
@@ -56,7 +74,7 @@ def _make_single_heatmap(ax, pivot, title):
     ax.set_title(title, fontsize=11, fontweight="bold")
 
 
-def make_heatmap(probs_df, output_dir):
+def make_heatmap(probs_df, output_dir, slice_label="All D-I Games", output_suffix=""):
     """Create side-by-side heatmaps: trailing team at home vs. away."""
     df = probs_df[probs_df["adequate_sample"]].copy()
 
@@ -79,21 +97,21 @@ def make_heatmap(probs_df, output_dir):
         _make_single_heatmap(ax, pivot, label)
 
     fig.suptitle(
-        "NCAA Women's Basketball: Trailing Team Win Probability\n"
-        "By deficit, time remaining, and venue — 288K games, 2001–2026",
+        f"NCAA Women's Basketball: Trailing Team Win Probability\n"
+        f"{slice_label} — By deficit, time remaining, and venue",
         fontsize=14,
         fontweight="bold",
         y=1.02,
     )
 
     plt.tight_layout()
-    out = output_dir / "comeback_heatmap.png"
+    out = output_dir / f"comeback_heatmap{output_suffix}.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {out}")
 
 
-def make_win_prob_curves(probs_df, output_dir):
+def make_win_prob_curves(probs_df, output_dir, slice_label="All D-I Games", output_suffix=""):
     """Line chart: trailing team win probability vs elapsed game time, home vs away."""
     df = probs_df[(probs_df["adequate_sample"]) & (probs_df["n_games"] >= 30)].copy()
 
@@ -131,8 +149,8 @@ def make_win_prob_curves(probs_df, output_dir):
     ax.set_xlabel("Minutes Elapsed", fontsize=12)
     ax.set_ylabel("Trailing Team Win Probability", fontsize=12)
     ax.set_title(
-        "Trailing Team Win Probability by Elapsed Game Time\n"
-        "Selected deficit sizes — solid = home, dashed = away",
+        f"Trailing Team Win Probability by Elapsed Game Time\n"
+        f"{slice_label} — Selected deficit sizes — solid = home, dashed = away",
         fontsize=14,
         fontweight="bold",
     )
@@ -144,16 +162,19 @@ def make_win_prob_curves(probs_df, output_dir):
     ax.grid(alpha=0.3)
 
     plt.tight_layout()
-    out = output_dir / "win_prob_curves.png"
+    out = output_dir / f"win_prob_curves{output_suffix}.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {out}")
 
 
-def find_greatest_comebacks(game_states_path, probs_df, output_dir, top_n=25):
+def find_greatest_comebacks(game_states_path, probs_df, output_dir, top_n=25,
+                            slice_filter=None, output_suffix=""):
     """Find the most improbable comebacks, ranked by lowest win probability at worst moment."""
     print("Loading game states for greatest comebacks analysis...")
     df = pd.read_parquet(game_states_path)
+    if slice_filter is not None:
+        df = slice_filter(df)
 
     # Only games where the trailing team won
     comebacks = df[df["trailing_team_won"]].copy()
@@ -238,7 +259,7 @@ def find_greatest_comebacks(game_states_path, probs_df, output_dir, top_n=25):
 
     top = worst_moments.head(top_n)
 
-    out_csv = output_dir / "greatest_comebacks.csv"
+    out_csv = output_dir / f"greatest_comebacks{output_suffix}.csv"
     top[["unique_game_id", "season", "winner", "loser", "home_final", "away_final",
          "max_deficit", "max_deficit_min_remaining", "max_deficit_period",
          "comeback_at", "worst_probability"]].to_csv(out_csv, index=False)
@@ -394,17 +415,30 @@ def main():
                         help="Game states parquet from parse_games.py")
     parser.add_argument("--output-dir", default="output",
                         help="Output directory for charts")
+    parser.add_argument("--slice", choices=SLICE_CONFIGS.keys(), default="all",
+                        help="Data slice to visualize (default: all)")
     args = parser.parse_args()
+
+    slice_cfg = SLICE_CONFIGS[args.slice]
+    slice_label = slice_cfg["label"]
+    output_suffix = slice_cfg["output_suffix"]
+    slice_filter = slice_cfg["filter"]
+
+    # Default probs file based on slice
+    if args.probs == "data/comeback_probs.csv" and args.slice != "all":
+        args.probs = f"data/comeback_probs{output_suffix}.csv"
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     probs_df = pd.read_csv(args.probs)
-    print(f"Loaded {len(probs_df)} probability cells")
+    print(f"Loaded {len(probs_df)} probability cells ({slice_label})")
 
-    make_heatmap(probs_df, output_dir)
-    make_win_prob_curves(probs_df, output_dir)
-    worst_moments = find_greatest_comebacks(args.game_states, probs_df, output_dir)
+    make_heatmap(probs_df, output_dir, slice_label, output_suffix)
+    make_win_prob_curves(probs_df, output_dir, slice_label, output_suffix)
+    worst_moments = find_greatest_comebacks(
+        args.game_states, probs_df, output_dir,
+        slice_filter=slice_filter, output_suffix=output_suffix)
 
     # Single-game chart for the most improbable comeback
     if not worst_moments.empty:

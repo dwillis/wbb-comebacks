@@ -13,10 +13,92 @@ Usage:
 import argparse
 import json
 import sys
+from functools import partial
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 import pandas as pd
+
+
+POWER_4_CONFERENCES = {"ACC", "Big 12", "Big Ten", "SEC"}
+
+
+def load_d1_teams(teams_json_path="data/teams.json"):
+    """Load Division I team data from teams.json.
+
+    Returns:
+        d1_ncaa_ids: set of NCAA IDs for D-I teams
+        ncaa_id_to_conference: dict mapping NCAA ID -> conference name
+    """
+    with open(teams_json_path) as f:
+        teams = json.load(f)
+    d1 = [t for t in teams if t.get("division") == "I"]
+    d1_ncaa_ids = {t["ncaa_id"] for t in d1}
+    ncaa_id_to_conference = {t["ncaa_id"]: t.get("conference", "") for t in d1}
+    return d1_ncaa_ids, ncaa_id_to_conference
+
+
+def build_d1_team_info(data_dir, d1_ncaa_ids, ncaa_id_to_conference):
+    """Build mappings from string team IDs (e.g. 'UA') to D-I team info.
+
+    For each D-I directory, scans all game files and identifies the string ID
+    that appears in every game (as home or away) — that's the directory's team.
+
+    Returns:
+        d1_string_ids: set of string IDs belonging to D-I teams
+        string_id_to_conference: dict mapping string ID -> conference name
+    """
+    from collections import Counter
+
+    d1_string_ids = set()
+    string_id_to_conference = {}
+    data_dir = Path(data_dir)
+
+    for team_dir in data_dir.iterdir():
+        if not team_dir.is_dir():
+            continue
+        ncaa_id = ncaa_id_from_dir(team_dir.name)
+        if ncaa_id not in d1_ncaa_ids:
+            continue
+
+        game_files = list(team_dir.glob("*/*.json"))
+        if not game_files:
+            continue
+
+        # Count how often each string ID appears across all games in this dir
+        id_counter = Counter()
+        total = 0
+        for gf in game_files:
+            try:
+                data = json.load(open(gf))
+                if not isinstance(data, dict):
+                    continue
+                g = data.get("Game", {})
+                for side in ("HomeTeam", "VisitingTeam"):
+                    tid = g.get(side, {}).get("Id", "")
+                    if tid:
+                        id_counter[tid] += 1
+                total += 1
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        if total == 0 or not id_counter:
+            continue
+
+        # The directory's team appears in every game; pick the ID with count == total
+        team_ids = [tid for tid, c in id_counter.items() if c == total]
+        if len(team_ids) == 1:
+            string_id = team_ids[0]
+        elif id_counter:
+            string_id = id_counter.most_common(1)[0][0]
+        else:
+            continue
+
+        d1_string_ids.add(string_id)
+        conference = ncaa_id_to_conference.get(ncaa_id, "")
+        string_id_to_conference[string_id] = conference
+
+    return d1_string_ids, string_id_to_conference
 
 
 def calc_seconds_remaining(period, clock_seconds, periods_regulation, ot_minutes=5, period_minutes=10):
@@ -36,7 +118,7 @@ def calc_seconds_remaining(period, clock_seconds, periods_regulation, ot_minutes
         return clock_seconds
 
 
-def parse_game(filepath):
+def parse_game(filepath, d1_string_ids=None, string_id_to_conference=None):
     """Parse a single game JSON file and return a list of game-state dicts."""
     filepath = Path(filepath)
 
@@ -89,8 +171,24 @@ def parse_game(filepath):
     away_team = away_info.get("Id", "")
     away_name = away_info.get("Name", "")
 
-    # Composite unique game identifier: season + game_id + both team IDs
-    unique_game_id = f"{season}_{game_id}_{home_team}_{away_team}"
+    # Filter: both teams must be Division I
+    if d1_string_ids is not None:
+        if home_team not in d1_string_ids or away_team not in d1_string_ids:
+            return []
+
+    game_date = game.get("Date", "")
+
+    # Conference lookups
+    conf_map = string_id_to_conference or {}
+    home_conference = conf_map.get(home_team, "")
+    away_conference = conf_map.get(away_team, "")
+    is_conference_game = home_conference != "" and home_conference == away_conference
+    home_is_power4 = home_conference in POWER_4_CONFERENCES
+    away_is_power4 = away_conference in POWER_4_CONFERENCES
+
+    # Unique identifier per game file: ncaa_id prefix from directory, season, game_id
+    team_ncaa_id = team_dir.split("-")[0] if team_dir != "unknown" else "unknown"
+    unique_game_id = f"{team_ncaa_id}-{season}-{game_id}"
 
     plays = data.get("Plays", [])
     if not plays:
@@ -138,11 +236,17 @@ def parse_game(filepath):
             "unique_game_id": unique_game_id,
             "game_id": game_id,
             "season": season,
+            "game_date": game_date,
             "team_dir": team_dir,
             "home_team": home_team,
             "home_name": home_name,
+            "home_conference": home_conference,
             "away_team": away_team,
             "away_name": away_name,
+            "away_conference": away_conference,
+            "is_conference_game": is_conference_game,
+            "home_is_power4": home_is_power4,
+            "away_is_power4": away_is_power4,
             "period": period,
             "clock_seconds": clock_seconds,
             "seconds_remaining": seconds_remaining,
@@ -176,9 +280,22 @@ def parse_game(filepath):
     return rows
 
 
-def find_game_files(data_dir):
-    """Find all game JSON files in the data directory."""
-    return list(Path(data_dir).glob("*/*/*.json"))
+def ncaa_id_from_dir(dirname):
+    """Extract the NCAA ID prefix from a team directory name like '8-alabama'."""
+    prefix = dirname.split("-")[0]
+    return int(prefix) if prefix.isdigit() else None
+
+
+def find_game_files(data_dir, d1_team_ids=None):
+    """Find all game JSON files in the data directory.
+
+    If d1_team_ids is provided, only include files from team directories
+    whose NCAA ID prefix is in the set.
+    """
+    all_files = list(Path(data_dir).glob("*/*/*.json"))
+    if d1_team_ids is None:
+        return all_files
+    return [f for f in all_files if ncaa_id_from_dir(f.parts[-3]) in d1_team_ids]
 
 
 def main():
@@ -197,17 +314,29 @@ def main():
         print(f"Error: {data_dir} does not exist", file=sys.stderr)
         sys.exit(1)
 
+    # Load Division I team data
+    d1_ncaa_ids, ncaa_id_to_conference = load_d1_teams()
+    print(f"Loaded {len(d1_ncaa_ids)} Division I team NCAA IDs")
+
     print(f"Finding game files in {data_dir}...")
-    files = find_game_files(data_dir)
-    print(f"Found {len(files):,} game files")
+    files = find_game_files(data_dir, d1_ncaa_ids)
+    print(f"Found {len(files):,} game files from D-I team directories")
+
+    # Build string ID -> conference mapping from directory contents
+    print("Building D-I string team ID mapping...")
+    d1_string_ids, string_id_to_conference = build_d1_team_info(
+        data_dir, d1_ncaa_ids, ncaa_id_to_conference)
+    print(f"Mapped {len(d1_string_ids)} D-I string team IDs")
 
     if args.limit > 0:
         files = files[:args.limit]
         print(f"Limited to {args.limit:,} files")
 
     print(f"Parsing with {args.workers} workers...")
+    parse_fn = partial(parse_game, d1_string_ids=d1_string_ids,
+                       string_id_to_conference=string_id_to_conference)
     with Pool(args.workers) as pool:
-        results = pool.map(parse_game, files, chunksize=200)
+        results = pool.map(parse_fn, files, chunksize=200)
 
     # Flatten list of lists
     all_rows = []
@@ -230,10 +359,12 @@ def main():
 
     df = pd.DataFrame(all_rows)
 
-    # Deduplicate: each game appears under both teams' directories.
-    # Use unique_game_id (season + game_id + home + away) for proper dedup.
+    # Deduplicate: the same game may appear under multiple team directories.
+    # Use home_team + away_team + game_date to identify the same game,
+    # then dedup scoring plays within each game.
     before = len(df)
-    df = df.drop_duplicates(subset=["unique_game_id", "period", "clock_seconds", "home_score", "away_score"])
+    df = df.drop_duplicates(subset=["home_team", "away_team", "game_date",
+                                     "period", "clock_seconds", "home_score", "away_score"])
     after = len(df)
     print(f"Deduplicated: {before:,} -> {after:,} rows ({before - after:,} duplicates removed)")
 

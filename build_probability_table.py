@@ -19,6 +19,24 @@ from scipy import stats
 
 from utils import bin_deficit, bin_deficit_sort_key, time_bucket_label, time_bucket_sort_key
 
+SLICE_CONFIGS = {
+    "all": {
+        "label": "All D-I games",
+        "filter": None,
+        "output_suffix": "",
+    },
+    "conference": {
+        "label": "Conference games only",
+        "filter": lambda df: df[df["is_conference_game"]],
+        "output_suffix": "_conference",
+    },
+    "power4-nonconf": {
+        "label": "Power 4 vs Power 4 non-conference",
+        "filter": lambda df: df[df["home_is_power4"] & df["away_is_power4"] & ~df["is_conference_game"]],
+        "output_suffix": "_power4_nonconf",
+    },
+}
+
 
 def wilson_ci(n_success, n_total, z=1.96):
     """Wilson score confidence interval for a binomial proportion."""
@@ -39,11 +57,25 @@ def main():
                         help="Output CSV file")
     parser.add_argument("--min-sample", type=int, default=30,
                         help="Minimum unique games for a cell to be flagged adequate (default: 30)")
+    parser.add_argument("--slice", choices=SLICE_CONFIGS.keys(), default="all",
+                        help="Data slice to analyze (default: all)")
     args = parser.parse_args()
+
+    # Set default output based on slice if not explicitly provided
+    if args.output == "data/comeback_probs.csv" and args.slice != "all":
+        suffix = SLICE_CONFIGS[args.slice]["output_suffix"]
+        args.output = f"data/comeback_probs{suffix}.csv"
 
     print(f"Loading {args.input}...")
     df = pd.read_parquet(args.input)
     print(f"  {len(df):,} rows, {df['unique_game_id'].nunique():,} games")
+
+    # Apply slice filter
+    slice_cfg = SLICE_CONFIGS[args.slice]
+    print(f"  Slice: {slice_cfg['label']}")
+    if slice_cfg["filter"] is not None:
+        df = slice_cfg["filter"](df)
+        print(f"  After filter: {len(df):,} rows, {df['unique_game_id'].nunique():,} games")
 
     # Filter to regulation only (exclude OT snapshots where seconds_remaining
     # is just OT clock — not comparable to regulation time)
